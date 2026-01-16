@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
-	"github.com/Brijesh-09/internal/handlers"
-	"github.com/Brijesh-09/storage"
+	. "github.com/Brijesh-09/internal/handlers"
+	. "github.com/Brijesh-09/storage"
 )
 
 func Logger(next http.HandlerFunc) http.HandlerFunc {
@@ -21,21 +23,37 @@ func Logger(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 func main() {
+	// Database connection string
+	// Format: postgres://username:password@localhost:5432/database?sslmode=disable
+	connStr := os.Getenv("DATABASE_URL")
+	if connStr == "" {
+		log.Fatal("❌ DATABASE_URL is not set")
+	}
+	// Connect to database
+	storage, err := NewPostgresStorage(connStr)
+	if err != nil {
+		log.Fatalf("Failed to connect to database: %v", err)
+	}
+	defer storage.Close()
 
-	// Initialize storage
-	store := storage.NewMemoryStorage()
+	// Initialize schema
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	// Initialize handlers
-	handler := handlers.NewURLHandler(store)
+	if err := storage.InitSchema(ctx); err != nil {
+		log.Fatalf("Failed to initialize schema: %v", err)
+	}
+
+	// Create handler
+	handler := NewURLHandler(storage)
 
 	// Setup routes
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", Logger(handler.Health))
-	mux.HandleFunc("/create", Logger(handler.Create))
-	mux.HandleFunc("/", Logger(handler.Redirect))
+	mux.HandleFunc("/health", handler.Health)
+	mux.HandleFunc("/create", handler.Create)
+	mux.HandleFunc("/", handler.Redirect)
 
 	// Start server
-	log.Println("Starting server on :9000")
+	log.Println("🚀 Starting server on :9000")
 	log.Fatal(http.ListenAndServe(":9000", mux))
-
 }

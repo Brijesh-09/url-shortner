@@ -1,60 +1,76 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Brijesh-09/internal/models"
-	"github.com/Brijesh-09/storage"
+	. "github.com/Brijesh-09/storage"
 )
 
-// URLHandler handles URL shortening requests
 type URLHandler struct {
-	storage *storage.MemoryStorage
+	storage *PostgresStorage
 }
 
-// NewURLHandler creates a new URL handler
-func NewURLHandler(store *storage.MemoryStorage) *URLHandler {
+func NewURLHandler(store *PostgresStorage) *URLHandler {
 	return &URLHandler{storage: store}
 }
 
-// Health checks if server is running
 func (h *URLHandler) Health(w http.ResponseWriter, r *http.Request) {
+	// Create a context with 2 second timeout
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel() // Always call cancel to free resources!
+
+	// Try to ping database
+	if err := h.storage.Ping(ctx); err != nil {
+		http.Error(w, "Database unhealthy", http.StatusServiceUnavailable)
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Server Healthy and running"))
+	w.Write([]byte("Server and Database Healthy"))
 }
 
-// Create handles URL shortening creation
 func (h *URLHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
+	// Parse JSON
 	var urlData models.URL
 	if err := json.NewDecoder(r.Body).Decode(&urlData); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
+	// Validate
 	if urlData.OriginalURL == "" || urlData.ShortCode == "" {
 		http.Error(w, "original_url and short_code are required", http.StatusBadRequest)
 		return
 	}
 
-	// Save to storage
-	if err := h.storage.Save(urlData); err != nil {
-		if errors.Is(err, storage.ErrAlreadyExists) {
+	// Create context with 5 second timeout
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	// Save to database
+	if err := h.storage.Save(ctx, urlData); err != nil {
+		if errors.Is(err, ErrAlreadyExists) {
 			http.Error(w, "Short code already exists", http.StatusConflict)
 			return
 		}
+		log.Printf("Error saving URL: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	// Send response
+	// Success response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{
@@ -64,57 +80,28 @@ func (h *URLHandler) Create(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Redirect handles redirection to original URL
 func (h *URLHandler) Redirect(w http.ResponseWriter, r *http.Request) {
 	code := strings.TrimPrefix(r.URL.Path, "/")
 
-	// Skip known routes
 	if code == "" || code == "health" || code == "create" {
 		return
 	}
 
-	// Get original URL
-	originalURL, err := h.storage.Get(code)
+	// Create context with 3 second timeout
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	// Get from database
+	originalURL, err := h.storage.Get(ctx, code)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
+		if errors.Is(err, ErrNotFound) {
 			http.Error(w, "Short URL not found", http.StatusNotFound)
 			return
 		}
+		log.Printf("Error getting URL: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	http.Redirect(w, r, originalURL, http.StatusFound)
-}
-
-func (h *URLHandler) Delete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	code := strings.TrimPrefix(r.URL.Path, "/delete/")
-
-	if code == "" {
-		http.Error(w, "short_code is required", http.StatusBadRequest)
-		return
-	}
-
-	// Delete from storage
-	if err := h.storage.Delete(code); err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			http.Error(w, "Short URL not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-
-	// Send response
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
-		"message":    "Short URL deleted",
-		"short_code": code,
-	})
 }
